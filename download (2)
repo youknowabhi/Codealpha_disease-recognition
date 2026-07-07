@@ -1,0 +1,2 @@
+# This directory holds raw CSV datasets downloaded from UCI.
+# Run: python src/data_loader.py --download

@@ -1,0 +1,153 @@
+"""
+predict.py
+----------
+Run inference on new patient data using saved models.
+
+Usage:
+    python src/predict.py --dataset heart --model xgboost --input data/sample_input.json
+"""
+
+import argparse
+import os
+import json
+import joblib
+import numpy as np
+import pandas as pd
+import yaml
+
+CONFIG_PATH = os.path.join(os.path.dirname(__file__), "..", "config.yaml")
+with open(CONFIG_PATH, "r") as f:
+    CONFIG = yaml.safe_load(f)
+
+MODELS_DIR = CONFIG["paths"]["models"]
+
+DISEASE_LABELS = {
+    "heart": {0: "No Heart Disease", 1: "Heart Disease"},
+    "diabetes": {0: "No Diabetes", 1: "Diabetes"},
+    "breast_cancer": {0: "Benign", 1: "Malignant"},
+}
+
+
+def load_model(dataset_name: str, model_name: str):
+    path = os.path.join(MODELS_DIR, f"{dataset_name}_{model_name}.pkl")
+    if not os.path.exists(path):
+        raise FileNotFoundError(
+            f"Model not found at '{path}'. Run train.py first."
+        )
+    return joblib.load(path)
+
+
+def load_pipeline(dataset_name: str):
+    path = os.path.join(MODELS_DIR, f"{dataset_name}_pipeline.pkl")
+    if not os.path.exists(path):
+        raise FileNotFoundError(
+            f"Pipeline not found at '{path}'. Run train.py first."
+        )
+    return joblib.load(path)
+
+
+def predict(
+    dataset_name: str,
+    input_data: dict | list[dict],
+    model_name: str = "xgboost",
+    verbose: bool = True,
+) -> list[dict]:
+    """
+    Predict disease probability for one or more patient records.
+
+    Parameters
+    ----------
+    dataset_name : 'heart' | 'diabetes' | 'breast_cancer'
+    input_data   : dict or list of dicts, one per patient
+    model_name   : classifier to use (default: xgboost)
+    verbose      : print predictions
+
+    Returns
+    -------
+    list of dicts with keys: prediction, label, probability
+    """
+    if isinstance(input_data, dict):
+        input_data = [input_data]
+
+    model = load_model(dataset_name, model_name)
+    pipeline = load_pipeline(dataset_name)
+
+    df = pd.DataFrame(input_data)
+    X = pipeline.transform(df)
+
+    predictions = model.predict(X)
+    labels = DISEASE_LABELS[dataset_name]
+
+    results = []
+    for i, pred in enumerate(predictions):
+        prob = None
+        if hasattr(model, "predict_proba"):
+            prob = float(model.predict_proba(X[i : i + 1])[0][pred])
+
+        result = {
+            "patient_index": i,
+            "prediction": int(pred),
+            "label": labels[int(pred)],
+            "probability": round(prob, 4) if prob else None,
+        }
+        results.append(result)
+
+        if verbose:
+            print(
+                f"Patient {i+1}: {result['label']} "
+                f"(confidence: {prob*100:.1f}%)" if prob else f"Patient {i+1}: {result['label']}"
+            )
+
+    return results
+
+
+def predict_all_models(dataset_name: str, input_data: dict | list[dict]) -> dict:
+    """Run prediction across all 4 classifiers and compare."""
+    model_names = ["logistic_regression", "svm", "random_forest", "xgboost"]
+    comparison = {}
+
+    for name in model_names:
+        try:
+            results = predict(dataset_name, input_data, model_name=name, verbose=False)
+            comparison[name] = results
+        except FileNotFoundError:
+            comparison[name] = "Model not trained yet"
+
+    return comparison
+
+
+# ── CLI ───────────────────────────────────────────────────────────────────────
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Disease Prediction — Inference")
+    parser.add_argument("--dataset", choices=["heart", "diabetes", "breast_cancer"], required=True)
+    parser.add_argument("--model", default="xgboost",
+                        choices=["logistic_regression", "svm", "random_forest", "xgboost"])
+    parser.add_argument("--input", help="Path to JSON file with patient data")
+    parser.add_argument("--compare", action="store_true",
+                        help="Run prediction on all 4 models and compare")
+
+    args = parser.parse_args()
+
+    if args.input:
+        with open(args.input) as f:
+            data = json.load(f)
+
+        print(f"\nDataset : {args.dataset}")
+        print(f"Model   : {args.model}")
+        print("-" * 40)
+
+        if args.compare:
+            comparison = predict_all_models(args.dataset, data)
+            for model_name, results in comparison.items():
+                print(f"\n[{model_name}]")
+                if isinstance(results, list):
+                    for r in results:
+                        prob = f" ({r['probability']*100:.1f}%)" if r['probability'] else ""
+                        print(f"  Patient {r['patient_index']+1}: {r['label']}{prob}")
+                else:
+                    print(f"  {results}")
+        else:
+            predict(args.dataset, data, model_name=args.model)
+    else:
+        print("[!] Please provide --input <path_to_json>")

@@ -1,0 +1,145 @@
+"""
+train.py
+--------
+Train all classifiers on a given medical dataset and save models.
+
+Usage:
+    python src/train.py --dataset all
+    python src/train.py --dataset heart
+"""
+
+import argparse
+import os
+import joblib
+import yaml
+import json
+import numpy as np
+from datetime import datetime
+
+from sklearn.linear_model import LogisticRegression
+from sklearn.svm import SVC
+from sklearn.ensemble import RandomForestClassifier
+from xgboost import XGBClassifier
+
+from data_loader import load_dataset
+from feature_engineering import preprocess
+from evaluate import evaluate_model, save_results
+
+# ── Config ────────────────────────────────────────────────────────────────────
+CONFIG_PATH = os.path.join(os.path.dirname(__file__), "..", "config.yaml")
+with open(CONFIG_PATH, "r") as f:
+    CONFIG = yaml.safe_load(f)
+
+MODELS_DIR = CONFIG["paths"]["models"]
+os.makedirs(MODELS_DIR, exist_ok=True)
+
+DATASETS = ["heart", "diabetes", "breast_cancer"]
+
+
+# ── Model factory ─────────────────────────────────────────────────────────────
+
+def build_models() -> dict:
+    mc = CONFIG["models"]
+    return {
+        "logistic_regression": LogisticRegression(
+            C=mc["logistic_regression"]["C"],
+            max_iter=mc["logistic_regression"]["max_iter"],
+            solver=mc["logistic_regression"]["solver"],
+            random_state=mc["logistic_regression"]["random_state"],
+        ),
+        "svm": SVC(
+            C=mc["svm"]["C"],
+            kernel=mc["svm"]["kernel"],
+            gamma=mc["svm"]["gamma"],
+            probability=mc["svm"]["probability"],
+            random_state=mc["svm"]["random_state"],
+        ),
+        "random_forest": RandomForestClassifier(
+            n_estimators=mc["random_forest"]["n_estimators"],
+            max_depth=mc["random_forest"]["max_depth"],
+            min_samples_split=mc["random_forest"]["min_samples_split"],
+            min_samples_leaf=mc["random_forest"]["min_samples_leaf"],
+            random_state=mc["random_forest"]["random_state"],
+        ),
+        "xgboost": XGBClassifier(
+            n_estimators=mc["xgboost"]["n_estimators"],
+            learning_rate=mc["xgboost"]["learning_rate"],
+            max_depth=mc["xgboost"]["max_depth"],
+            subsample=mc["xgboost"]["subsample"],
+            colsample_bytree=mc["xgboost"]["colsample_bytree"],
+            random_state=mc["xgboost"]["random_state"],
+            eval_metric=mc["xgboost"]["eval_metric"],
+            verbosity=0,
+        ),
+    }
+
+
+# ── Train ─────────────────────────────────────────────────────────────────────
+
+def train_on_dataset(dataset_name: str):
+    print(f"\n{'='*60}")
+    print(f"  Training on: {dataset_name.upper()}")
+    print(f"{'='*60}")
+
+    X, y = load_dataset(dataset_name)
+    X_train, X_test, y_train, y_test, pipeline = preprocess(X, y, dataset_name)
+
+    # Save preprocessing pipeline
+    pipe_path = os.path.join(MODELS_DIR, f"{dataset_name}_pipeline.pkl")
+    joblib.dump(pipeline, pipe_path)
+    print(f"[✓] Pipeline saved → {pipe_path}")
+
+    models = build_models()
+    all_metrics = {}
+
+    for model_name, model in models.items():
+        print(f"\n  [{model_name}] Training...")
+        model.fit(X_train, y_train)
+
+        metrics = evaluate_model(model, X_test, y_test, model_name, dataset_name)
+        all_metrics[model_name] = metrics
+
+        # Save model
+        model_path = os.path.join(MODELS_DIR, f"{dataset_name}_{model_name}.pkl")
+        joblib.dump(model, model_path)
+        print(f"  [✓] Model saved → {model_path}")
+        print(f"      Accuracy: {metrics['accuracy']:.4f} | AUC-ROC: {metrics['roc_auc']:.4f}")
+
+    # Save aggregated metrics
+    save_results(all_metrics, dataset_name)
+
+    # Print summary
+    print(f"\n{'─'*60}")
+    print(f"  Summary — {dataset_name.upper()}")
+    print(f"{'─'*60}")
+    print(f"  {'Model':<25} {'Accuracy':>10} {'AUC-ROC':>10}")
+    for name, m in all_metrics.items():
+        print(f"  {name:<25} {m['accuracy']:>10.4f} {m['roc_auc']:>10.4f}")
+
+    return all_metrics
+
+
+def train_all():
+    summary = {}
+    for ds in DATASETS:
+        summary[ds] = train_on_dataset(ds)
+    print("\n[✓] All models trained and saved.")
+    return summary
+
+
+# ── CLI ───────────────────────────────────────────────────────────────────────
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Disease Prediction — Train")
+    parser.add_argument(
+        "--dataset",
+        choices=["heart", "diabetes", "breast_cancer", "all"],
+        default="all",
+        help="Which dataset to train on",
+    )
+    args = parser.parse_args()
+
+    if args.dataset == "all":
+        train_all()
+    else:
+        train_on_dataset(args.dataset)
